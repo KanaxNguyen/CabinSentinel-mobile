@@ -12,3 +12,16 @@ npm run typecheck
 ```
 
 Build thử bản cài: xem các script `eas:*` trong `apps/mobile/package.json` (cần tài khoản Expo, bạn tự đăng nhập).
+
+## Bản web (Cabin Noir)
+
+Giao diện kiểu Apple (vật liệu kính mờ, danh sách nhóm, sheet) dùng chung API với app SwiftUI:
+đăng nhập OTP, trạng thái xe, xử lý sự cố (xem, xác nhận kiểm tra), đưa đón, lịch sử.
+
+- Mặc định chạy dữ liệu **Mô phỏng** (có nhãn). Vào Tài khoản, chọn "Máy chủ thật", nhập địa chỉ máy chủ rồi đăng nhập.
+- Dữ liệu thiếu hoặc cũ không bao giờ hiển thị là an toàn; sự cố chỉ đóng khi máy chủ xác nhận không còn thấy người.
+- Máy chủ phải bật CORS cho địa chỉ web (biến `CORS_ORIGINS` của backend).
+
+```bash
+npm run build:web --workspace @cabinsentinel/mobile
+```

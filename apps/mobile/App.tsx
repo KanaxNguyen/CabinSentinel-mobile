@@ -1,38 +1,15 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
 import { Ionicons } from '@expo/vector-icons'
-import { CabinSentinelClient } from '@cabinsentinel/api-client'
-import type { V1CabinState } from '@cabinsentinel/contracts'
-import { SCENARIOS, type CabinView, type Scenario } from './src/noir/demo'
-import { Home } from './src/noir/Home'
-import { Account, History, School } from './src/noir/Screens'
-import { N, type Level } from './src/noir/theme'
-
-const apiBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL
-const vehicleId = process.env.EXPO_PUBLIC_VEHICLE_ID || 'CAR_1'
-const client = apiBaseUrl ? new CabinSentinelClient({ baseUrl: apiBaseUrl, credentials: 'omit' }) : undefined
-
-const LEVELS: Record<string, Level> = { safe: 'safe', notice: 'notice', warning: 'warning', critical: 'critical' }
-
-// Live state never invents anything: a missing or stale value stays unknown, and unknown is never shown as safe.
-function fromLive(state: V1CabinState | undefined, failure: string | undefined): CabinView {
-  if (!state) return { level: 'unknown', title: 'Chưa có dữ liệu từ xe', detail: failure ?? 'Chưa có trạng thái đã xác minh. Hãy kiểm tra xe trực tiếp.', seat: 'Chưa có dữ liệu', temp: null, children: null, items: null, updated: 'chưa có', fresh: false }
-  const level = LEVELS[(state.risk_level ?? '').toLowerCase()] ?? 'unknown'
-  const objects = state.detected_objects ?? []
-  const when = state.evaluated_at ?? state.freshness?.as_of
-  return {
-    level: state.decision_current === true ? level : 'unknown',
-    title: state.reason || 'Không có lý do từ máy chủ',
-    detail: state.decision_current === true ? 'Trạng thái từ máy chủ' : 'Đây là trạng thái cũ, hãy kiểm tra xe trực tiếp',
-    seat: state.occupancy_state || 'Chưa có dữ liệu',
-    temp: state.temperature ?? null,
-    children: null,
-    items: objects.length ? objects.length : null,
-    updated: when ? new Date(when).toLocaleTimeString('vi-VN') : 'chưa có',
-    fresh: state.decision_current === true,
-  }
-}
+import { Api, ApiError, type EventItem, type Me, type Trip, type VehicleSummary } from './src/noir/api'
+import { DEMO_EVENTS, DEMO_TIMES, DEMO_TRIPS, SCENARIOS, type Scenario } from './src/noir/demo'
+import { Home, type IncidentActions } from './src/noir/Home'
+import { fromStatus, unknownView, type CabinView } from './src/noir/model'
+import { Account, History, Login, School } from './src/noir/Screens'
+import { loadSession, saveSession, type Session } from './src/noir/session'
+import { FONT, material, N } from './src/noir/theme'
+import { Button } from './src/noir/ui'
 
 type Tab = 'car' | 'school' | 'history' | 'account'
 const TABS: { key: Tab; label: string; icon: React.ComponentProps<typeof Ionicons>['name'] }[] = [
@@ -41,34 +18,121 @@ const TABS: { key: Tab; label: string; icon: React.ComponentProps<typeof Ionicon
   { key: 'history', label: 'Lịch sử', icon: 'time' },
   { key: 'account', label: 'Tài khoản', icon: 'person-circle' },
 ]
+const POLL_MS = 5000
 
 export default function App() {
+  const [session, setSession] = useState<Session>(loadSession)
   const [tab, setTab] = useState<Tab>('car')
   const [scenario, setScenario] = useState<Scenario>('safe')
-  const [live, setLive] = useState(false)
-  const [state, setState] = useState<V1CabinState>()
-  const [failure, setFailure] = useState<string>()
+  const [demoViewed, setDemoViewed] = useState(false)
+  const [demoStage, setDemoStage] = useState(0)
 
+  const [view, setView] = useState<CabinView>()
+  const [trips, setTrips] = useState<Trip[]>([])
+  const [events, setEvents] = useState<EventItem[]>([])
+  const [vehicles, setVehicles] = useState<VehicleSummary[]>([])
+  const [me, setMe] = useState<Me>()
+  const [error, setError] = useState<string>()
+  const [serverStatus, setServerStatus] = useState<string>()
+
+  const live = session.live
+  const update = useCallback((patch: Partial<Session>) => setSession(s => { const n = { ...s, ...patch }; saveSession(n); return n }), [])
+  const api = useMemo(() => new Api(session.server, session.token), [session.server, session.token])
+  const signedIn = live && !!session.token && !!session.server
+  const tabRef = useRef(tab); tabRef.current = tab
+
+  const signOut = useCallback(() => { if (session.token) void api.logout(); update({ token: undefined, vehicle: undefined }); setView(undefined); setVehicles([]); setMe(undefined) }, [api, session.token, update])
+  const fail = useCallback((e: unknown) => {
+    if (e instanceof ApiError && e.status === 401) { signOut(); setError('Phiên đăng nhập đã hết hạn. Đăng nhập lại.'); return }
+    setError(e instanceof Error ? e.message : 'Máy chủ không phản hồi')
+  }, [signOut])
+
+  // Live data. A failed or empty response never turns into a "safe" view.
   const refresh = useCallback(async () => {
-    if (!client) { setFailure('Chưa cấu hình địa chỉ máy chủ.'); return }
-    try { setState(await client.v1State(vehicleId)); setFailure(undefined) } catch (e) { setState(undefined); setFailure(e instanceof Error ? e.message : 'Máy chủ không phản hồi') }
-  }, [])
-  useEffect(() => { if (live) void refresh() }, [live, refresh])
+    if (!signedIn) return
+    try {
+      let list = vehicles
+      if (!list.length) { list = await api.vehicles(); setVehicles(list); setMe(await api.me()) }
+      const id = session.vehicle && list.some(v => v.vehicle.id === session.vehicle) ? session.vehicle : list[0]?.vehicle.id
+      if (!id) { setView(unknownView('Chưa có xe nào. Liên kết xe trên ứng dụng điện thoại.')); setError(undefined); return }
+      if (id !== session.vehicle) update({ vehicle: id })
+      setView(fromStatus(await api.status(id)))
+      if (tabRef.current === 'school') setTrips(await api.trips(id))
+      if (tabRef.current === 'history') setEvents((await api.history(id)).events)
+      setError(undefined)
+    } catch (e) {
+      setView(unknownView(e instanceof Error ? e.message : 'Máy chủ không phản hồi'))
+      fail(e)
+    }
+  }, [api, fail, session.vehicle, signedIn, update, vehicles])
 
-  const view = live ? fromLive(state, failure) : SCENARIOS[scenario]
-  const liveNote = state ? 'Đang hiển thị trạng thái thật từ máy chủ.' : `Máy chủ thật: ${failure ?? 'đang tải'}. Không có dữ liệu thì không hiển thị là an toàn.`
+  useEffect(() => {
+    if (!signedIn) return
+    void refresh()
+    const t = setInterval(() => void refresh(), POLL_MS)
+    return () => clearInterval(t)
+  }, [signedIn, refresh, tab])
+
+  useEffect(() => {
+    if (!live || !session.server) { setServerStatus(undefined); return }
+    let stop = false
+    new Api(session.server).health().then(h => { if (!stop) setServerStatus(`Máy chủ phản hồi (${h.env ?? 'ok'}).`) }).catch(() => { if (!stop) setServerStatus('Không kết nối được máy chủ này.') })
+    return () => { stop = true }
+  }, [live, session.server])
+
+  const demoView: CabinView = useMemo(() => {
+    const v = SCENARIOS[scenario]
+    return v.incident ? { ...v, incident: { ...v.incident, viewed: demoViewed } } : v
+  }, [scenario, demoViewed])
+  const shown = live ? (view ?? unknownView(signedIn ? 'Đang tải trạng thái xe…' : 'Chưa đăng nhập.')) : demoView
+
+  const actions: IncidentActions = live
+    ? {
+        view: async () => { if (shown.incident) { try { await api.view(shown.incident.id); await refresh() } catch (e) { fail(e) } } },
+        confirm: async checks => {
+          if (!shown.incident) return { closed: false, message: 'Không có sự cố đang mở.' }
+          try {
+            const r = await api.confirm(shown.incident.id, shown.incident.revision, checks)
+            await refresh()
+            return r.result === 'resolved'
+              ? { closed: true, message: 'Hệ thống không còn phát hiện người trong xe. Cả gia đình đã nhận thông báo.' }
+              : { closed: false, message: r.reject?.message ?? 'Máy chủ chưa chấp nhận xác nhận.' }
+          } catch (e) { return { closed: false, message: e instanceof Error ? e.message : 'Không gửi được xác nhận.' } }
+        },
+      }
+    : {
+        view: async () => setDemoViewed(true),
+        confirm: async () => ({ closed: false, message: 'Camera mô phỏng vẫn thấy người trong xe, nên sự cố chưa được đóng. Chọn kịch bản "Bình thường" để mô phỏng người đã rời xe.' }),
+      }
+
+  const pickTrips = live ? trips : [DEMO_TRIPS[demoStage]!]
+  const doTrip = (kind: 'pickup' | 'dropoff') => async (t: Trip) => {
+    try { if (kind === 'pickup') await api.pickup(t.child.id, t.vehicle_id); else await api.dropoff(t.child.id, t.vehicle_id, false); await refresh() } catch (e) { fail(e) }
+  }
+
+  const body = () => {
+    if (tab === 'account') {
+      return <Account live={live} onMode={v => { update({ live: v }); setError(undefined) }} server={session.server} onServer={s => update({ server: s })} me={me} vehicles={vehicles} vehicleId={session.vehicle} onVehicle={id => update({ vehicle: id })} onLogout={signOut} serverStatus={serverStatus} />
+    }
+    if (live && !signedIn) {
+      return (
+        <View style={{ flex: 1 }}>
+          <Login server={session.server} onServer={s => update({ server: s })} onDone={(token, name, phone) => { update({ token, name, phone }); setError(undefined) }} />
+          <View style={s.backWrap} pointerEvents="box-none"><View style={{ width: '100%', maxWidth: 488 }}><Button label="Dùng dữ liệu mô phỏng" kind="tinted" tone="gray" onPress={() => update({ live: false })} /></View></View>
+        </View>
+      )
+    }
+    if (tab === 'school') return <School trips={pickTrips} simulated={!live} error={live ? error : undefined} onPickup={doTrip('pickup')} onDropoff={doTrip('dropoff')} onAdvance={() => setDemoStage(i => (i + 1) % DEMO_TRIPS.length)} />
+    if (tab === 'history') return <History events={live ? events : DEMO_EVENTS} times={live ? undefined : DEMO_TIMES} simulated={!live} error={live ? error : undefined} />
+    return <Home view={shown} simulated={!live || !!shown.sim} demo={!live} actions={actions} scenario={scenario} onScenario={k => { setScenario(k); setDemoViewed(false) }} notice={live ? error : undefined} />
+  }
 
   return (
     <SafeAreaView style={s.safe}>
       <StatusBar style="light" />
-      <View style={{ flex: 1 }}>
-        {tab === 'car' && <Home view={view} simulated={!live} scenario={scenario} onScenario={setScenario} />}
-        {tab === 'school' && <School />}
-        {tab === 'history' && <History />}
-        {tab === 'account' && <Account live={live} onLive={setLive} apiConfigured={!!client} liveNote={liveNote} />}
-      </View>
+      <View style={{ flex: 1 }}>{body()}</View>
       <View style={s.barWrap} pointerEvents="box-none">
-        <View style={s.bar}>
+        <View style={[s.bar, material('thick')]}>
           {TABS.map(t => {
             const on = tab === t.key
             return (
@@ -86,9 +150,10 @@ export default function App() {
 
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: N.canvas },
+  backWrap: { position: 'absolute', left: 16, right: 16, bottom: 104, alignItems: 'center' },
   barWrap: { position: 'absolute', left: 0, right: 0, bottom: 14, alignItems: 'center' },
-  bar: { flexDirection: 'row', gap: 4, padding: 6, borderRadius: 34, backgroundColor: 'rgba(40,40,44,0.92)', borderWidth: 1, borderColor: N.line, width: '92%', maxWidth: 480 },
+  bar: { flexDirection: 'row', gap: 4, padding: 6, borderRadius: 34, width: '92%', maxWidth: 480 },
   tab: { flex: 1, alignItems: 'center', gap: 2, paddingVertical: 8, borderRadius: 28 },
-  tabOn: { backgroundColor: 'rgba(255,255,255,0.10)' },
-  tabText: { color: N.ink2, fontSize: 11, fontWeight: '600' },
+  tabOn: { backgroundColor: 'rgba(255,255,255,0.12)' },
+  tabText: { fontFamily: FONT, color: N.ink2, fontSize: 10.5, fontWeight: '600' },
 })
