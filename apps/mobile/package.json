@@ -1,5 +1,8 @@
 {
-  "name": "@cabinsentinel/mobile", "version": "0.1.0", "private": true, "main": "index.js",
+  "name": "@cabinsentinel/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
@@ -10,8 +13,25 @@
     "eas:production:android": "npx --yes eas-cli@latest build --profile production --platform android",
     "eas:production:ios": "npx --yes eas-cli@latest build --profile production --platform ios",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:web": "expo export --platform web --output-dir dist"
   },
-  "dependencies": { "@cabinsentinel/api-client": "*", "@cabinsentinel/contracts": "*", "@cabinsentinel/domain": "*", "expo": "^54.0.0", "expo-linking": "~8.0.0", "expo-status-bar": "~3.0.8", "react": "19.1.0", "react-native": "0.81.5" },
-  "devDependencies": { "@types/react": "^19.1.0", "typescript": "~6.0.2", "vitest": "^3.0.5" }
+  "dependencies": {
+    "@cabinsentinel/api-client": "*",
+    "@cabinsentinel/contracts": "*",
+    "@cabinsentinel/domain": "*",
+    "@expo/metro-runtime": "~6.1.2",
+    "expo": "^54.0.0",
+    "expo-linking": "~8.0.0",
+    "expo-status-bar": "~3.0.8",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-web": "^0.21.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "typescript": "~6.0.2",
+    "vitest": "^3.0.5"
+  }
 }
