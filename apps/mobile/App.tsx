@@ -1,34 +1,94 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ActivityIndicator, Linking, Pressable, RefreshControl, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native'
 import { StatusBar } from 'expo-status-bar'
+import { Ionicons } from '@expo/vector-icons'
 import { CabinSentinelClient } from '@cabinsentinel/api-client'
-import type { RiskLevel, V1CabinState } from '@cabinsentinel/contracts'
-import { formatRelativeTime, formatTemperature, severityPresentation } from '@cabinsentinel/domain'
-import { parseDeepLink, type MobileDestination } from './src/navigation/deepLinks'
+import type { V1CabinState } from '@cabinsentinel/contracts'
+import { SCENARIOS, type CabinView, type Scenario } from './src/noir/demo'
+import { Home } from './src/noir/Home'
+import { Account, History, School } from './src/noir/Screens'
+import { N, type Level } from './src/noir/theme'
 
 const apiBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL
-const configuredVehicleId = process.env.EXPO_PUBLIC_VEHICLE_ID || 'CAR_1'
+const vehicleId = process.env.EXPO_PUBLIC_VEHICLE_ID || 'CAR_1'
 const client = apiBaseUrl ? new CabinSentinelClient({ baseUrl: apiBaseUrl, credentials: 'omit' }) : undefined
-const risks: RiskLevel[] = ['SAFE','NOTICE','WARNING','CRITICAL','ERROR']
-const riskOf = (item: V1CabinState): RiskLevel => { const value = item.risk_level?.toUpperCase() as RiskLevel; return risks.includes(value) ? value : 'ERROR' }
+
+const LEVELS: Record<string, Level> = { safe: 'safe', notice: 'notice', warning: 'warning', critical: 'critical' }
+
+// Live state never invents anything: a missing or stale value stays unknown, and unknown is never shown as safe.
+function fromLive(state: V1CabinState | undefined, failure: string | undefined): CabinView {
+  if (!state) return { level: 'unknown', title: 'Chưa có dữ liệu từ xe', detail: failure ?? 'Chưa có trạng thái đã xác minh. Hãy kiểm tra xe trực tiếp.', seat: 'Chưa có dữ liệu', temp: null, children: null, items: null, updated: 'chưa có', fresh: false }
+  const level = LEVELS[(state.risk_level ?? '').toLowerCase()] ?? 'unknown'
+  const objects = state.detected_objects ?? []
+  const when = state.evaluated_at ?? state.freshness?.as_of
+  return {
+    level: state.decision_current === true ? level : 'unknown',
+    title: state.reason || 'Không có lý do từ máy chủ',
+    detail: state.decision_current === true ? 'Trạng thái từ máy chủ' : 'Đây là trạng thái cũ, hãy kiểm tra xe trực tiếp',
+    seat: state.occupancy_state || 'Chưa có dữ liệu',
+    temp: state.temperature ?? null,
+    children: null,
+    items: objects.length ? objects.length : null,
+    updated: when ? new Date(when).toLocaleTimeString('vi-VN') : 'chưa có',
+    fresh: state.decision_current === true,
+  }
+}
+
+type Tab = 'car' | 'school' | 'history' | 'account'
+const TABS: { key: Tab; label: string; icon: React.ComponentProps<typeof Ionicons>['name'] }[] = [
+  { key: 'car', label: 'Xe', icon: 'car-sport' },
+  { key: 'school', label: 'Đưa đón', icon: 'people' },
+  { key: 'history', label: 'Lịch sử', icon: 'time' },
+  { key: 'account', label: 'Tài khoản', icon: 'person-circle' },
+]
 
 export default function App() {
-  const [destination, setDestination] = useState<MobileDestination>({ screen: 'home' })
+  const [tab, setTab] = useState<Tab>('car')
+  const [scenario, setScenario] = useState<Scenario>('safe')
+  const [live, setLive] = useState(false)
   const [state, setState] = useState<V1CabinState>()
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string>()
-  const refresh = useCallback(async () => { if (!client) { setError('EXPO_PUBLIC_API_BASE_URL is not configured.'); setLoading(false); return } setLoading(true); try { setState(await client.v1State(destination.screen === 'vehicle' ? destination.vehicleId : configuredVehicleId)); setError(undefined) } catch (reason) { setError(reason instanceof Error ? reason.message : 'Backend unavailable') } finally { setLoading(false) } }, [destination])
-  useEffect(() => { void refresh() }, [refresh])
-  useEffect(() => { const open = ({ url }: { url: string }) => setDestination(parseDeepLink(url)); void Linking.getInitialURL().then(url => { if (url) setDestination(parseDeepLink(url)) }); const subscription = Linking.addEventListener('url', open); return () => subscription.remove() }, [])
-  return <SafeAreaView style={styles.safe}><StatusBar style="dark" /><View style={styles.header}><View style={styles.logo}><Text style={styles.heart}>♡</Text><Text style={styles.brand}>CabinSentinel</Text></View><View style={styles.live}><View style={styles.dot} /><Text style={styles.liveText}>LIVE API</Text></View></View><ScrollView refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void refresh()} />} contentContainerStyle={styles.content}>
-    {destination.screen !== 'home' && <Pressable onPress={() => setDestination({ screen: 'home' })}><Text style={styles.link}>‹ Back</Text></Pressable>}
-    {loading && !state ? <Loading /> : error ? <Unavailable message={error} onRetry={() => void refresh()} /> : state ? <VehicleState item={state} /> : <Unavailable message="No verified vehicle state was returned." onRetry={() => void refresh()} />}
-    {destination.screen === 'incident' && <View style={styles.pending}><Text style={styles.cardTitle}>Incident {destination.incidentId}</Text><Text style={styles.note}>The push link triggered a fresh vehicle-state request. Full incident detail and acknowledgement require the authenticated incident API.</Text><Pressable disabled style={[styles.primary, styles.disabled]}><Text style={styles.primaryText}>Acknowledge incident</Text></Pressable></View>}
-  </ScrollView><View style={styles.tabs}><Pressable style={styles.tab} onPress={() => setDestination({ screen: 'home' })}><Text style={styles.tabActive}>Home</Text></Pressable><Pressable style={styles.tab} onPress={() => setDestination({ screen: 'vehicle', vehicleId: configuredVehicleId })}><Text style={styles.tabText}>Vehicle</Text></Pressable><Pressable style={styles.tab} disabled><Text style={styles.tabDisabled}>History</Text></Pressable><Pressable style={styles.tab} disabled><Text style={styles.tabDisabled}>Profile</Text></Pressable></View></SafeAreaView>
-}
-function Loading() { return <View style={styles.center}><ActivityIndicator color="#c94f78" /><Text style={styles.note}>Requesting verified backend state…</Text></View> }
-function Unavailable({ message, onRetry }: { message: string; onRetry: () => void }) { return <View style={styles.center}><Text style={styles.stateIcon}>♡</Text><Text style={styles.title}>Status unavailable</Text><Text style={styles.note}>{message} The cabin has not been marked safe.</Text><Pressable style={styles.secondary} onPress={onRetry}><Text style={styles.secondaryText}>Try again</Text></Pressable></View> }
-function VehicleState({ item }: { item: V1CabinState }) { const risk = riskOf(item); const time = item.evaluated_at || item.freshness?.as_of; return <><Text style={styles.eyebrow}>Vehicle {item.vehicle_id || configuredVehicleId}</Text><Text style={styles.title}>Cabin overview</Text><View accessibilityRole="alert" style={[styles.card, styles[`risk${risk}`]]}><Text style={styles.eyebrow}>Backend status</Text><Text style={[styles.severity, { color: risk === 'SAFE' ? '#187554' : risk === 'CRITICAL' ? '#a6283e' : '#875b13' }]}>{severityPresentation[risk].label.toUpperCase()}</Text><Text style={styles.cardTitle}>{item.reason || 'Backend did not provide a reason.'}</Text><Text style={styles.note}>{time ? formatRelativeTime(time) : 'Evaluation time unavailable'} · revision {item.revision ?? '—'}</Text>{item.decision_current !== true && <Text style={styles.stale}>Last known state — check the cabin directly.</Text>}</View><View style={styles.metrics}><Metric label="Temperature" value={formatTemperature(item.temperature ?? undefined)} /><Metric label="Occupancy" value={item.occupancy_state || 'UNKNOWN'} /><Metric label="Camera" value={item.camera_status || 'UNKNOWN'} /><Metric label="Rule" value={item.rule_id || 'UNMAPPED'} /></View><View style={styles.pending}><Text style={styles.cardTitle}>Emergency response</Text><Text style={styles.note}>Remote commands remain disabled until backend authorization and device-confirmation APIs are available.</Text><Pressable disabled style={[styles.primary, styles.disabled]}><Text style={styles.primaryText}>Request emergency action</Text></Pressable></View></> }
-function Metric({ label, value }: { label: string; value: string }) { return <View style={styles.metric}><Text style={styles.note}>{label}</Text><Text style={styles.metricValue}>{value}</Text></View> }
+  const [failure, setFailure] = useState<string>()
 
-const styles = StyleSheet.create({ safe:{flex:1,backgroundColor:'#fff8fa'},header:{paddingHorizontal:20,paddingVertical:14,backgroundColor:'#fff',borderBottomWidth:1,borderBottomColor:'#ecdde4',flexDirection:'row',justifyContent:'space-between',alignItems:'center'},logo:{flexDirection:'row',alignItems:'center',gap:8},heart:{fontSize:27,color:'#c94f78',fontWeight:'900'},brand:{fontSize:19,fontWeight:'900',color:'#382832'},live:{flexDirection:'row',alignItems:'center',gap:6,backgroundColor:'#e8f7f0',paddingHorizontal:9,paddingVertical:5,borderRadius:20},dot:{width:7,height:7,borderRadius:4,backgroundColor:'#39a979'},liveText:{fontSize:9,fontWeight:'900',color:'#237255'},content:{padding:20,paddingBottom:42,gap:14},title:{fontSize:27,fontWeight:'900',color:'#382832'},eyebrow:{fontSize:11,fontWeight:'900',letterSpacing:1.2,textTransform:'uppercase',color:'#806977'},card:{backgroundColor:'#fff',borderWidth:1,borderColor:'#ecdde4',borderRadius:18,padding:18,gap:8,shadowColor:'#8d4961',shadowOpacity:.08,shadowRadius:15},riskSAFE:{borderLeftWidth:6,borderLeftColor:'#57b98e'},riskNOTICE:{borderLeftWidth:6,borderLeftColor:'#78b7c3'},riskWARNING:{borderLeftWidth:6,borderLeftColor:'#e6b84b'},riskCRITICAL:{borderLeftWidth:6,borderLeftColor:'#e45f6f'},riskERROR:{borderLeftWidth:6,borderLeftColor:'#77717b'},severity:{fontSize:15,fontWeight:'900'},cardTitle:{fontSize:18,fontWeight:'800',color:'#382832'},note:{fontSize:13,lineHeight:19,color:'#746772'},stale:{padding:10,borderRadius:10,backgroundColor:'#fff0d0',color:'#76520e',fontWeight:'700'},metrics:{flexDirection:'row',flexWrap:'wrap',gap:10},metric:{width:'48%',minHeight:84,backgroundColor:'#fff',borderWidth:1,borderColor:'#ecdde4',borderRadius:15,padding:14},metricValue:{fontSize:16,fontWeight:'800',color:'#382832',marginTop:5},pending:{backgroundColor:'#fff',borderWidth:1,borderColor:'#ecdde4',borderRadius:18,padding:18,gap:10},primary:{backgroundColor:'#c94f78',padding:15,borderRadius:12,alignItems:'center'},primaryText:{color:'#fff',fontWeight:'900'},disabled:{opacity:.48},secondary:{borderWidth:1,borderColor:'#c94f78',paddingHorizontal:20,paddingVertical:12,borderRadius:12},secondaryText:{color:'#a43e61',fontWeight:'800'},center:{minHeight:330,alignItems:'center',justifyContent:'center',gap:12,padding:24},stateIcon:{fontSize:44,color:'#d35d83'},link:{color:'#a43e61',fontWeight:'800',fontSize:16},tabs:{flexDirection:'row',backgroundColor:'#fff',borderTopWidth:1,borderTopColor:'#ecdde4'},tab:{flex:1,paddingVertical:14,alignItems:'center'},tabText:{fontSize:12,color:'#746772'},tabActive:{fontSize:12,color:'#b33f68',fontWeight:'900'},tabDisabled:{fontSize:12,color:'#b8aab2'}})
+  const refresh = useCallback(async () => {
+    if (!client) { setFailure('Chưa cấu hình địa chỉ máy chủ.'); return }
+    try { setState(await client.v1State(vehicleId)); setFailure(undefined) } catch (e) { setState(undefined); setFailure(e instanceof Error ? e.message : 'Máy chủ không phản hồi') }
+  }, [])
+  useEffect(() => { if (live) void refresh() }, [live, refresh])
+
+  const view = live ? fromLive(state, failure) : SCENARIOS[scenario]
+  const liveNote = state ? 'Đang hiển thị trạng thái thật từ máy chủ.' : `Máy chủ thật: ${failure ?? 'đang tải'}. Không có dữ liệu thì không hiển thị là an toàn.`
+
+  return (
+    <SafeAreaView style={s.safe}>
+      <StatusBar style="light" />
+      <View style={{ flex: 1 }}>
+        {tab === 'car' && <Home view={view} simulated={!live} scenario={scenario} onScenario={setScenario} />}
+        {tab === 'school' && <School />}
+        {tab === 'history' && <History />}
+        {tab === 'account' && <Account live={live} onLive={setLive} apiConfigured={!!client} liveNote={liveNote} />}
+      </View>
+      <View style={s.barWrap} pointerEvents="box-none">
+        <View style={s.bar}>
+          {TABS.map(t => {
+            const on = tab === t.key
+            return (
+              <Pressable key={t.key} accessibilityRole="tab" accessibilityState={{ selected: on }} onPress={() => setTab(t.key)} style={[s.tab, on && s.tabOn]}>
+                <Ionicons name={t.icon} size={22} color={on ? N.accent : N.ink2} />
+                <Text style={[s.tabText, on && { color: N.accent }]}>{t.label}</Text>
+              </Pressable>
+            )
+          })}
+        </View>
+      </View>
+    </SafeAreaView>
+  )
+}
+
+const s = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: N.canvas },
+  barWrap: { position: 'absolute', left: 0, right: 0, bottom: 14, alignItems: 'center' },
+  bar: { flexDirection: 'row', gap: 4, padding: 6, borderRadius: 34, backgroundColor: 'rgba(40,40,44,0.92)', borderWidth: 1, borderColor: N.line, width: '92%', maxWidth: 480 },
+  tab: { flex: 1, alignItems: 'center', gap: 2, paddingVertical: 8, borderRadius: 28 },
+  tabOn: { backgroundColor: 'rgba(255,255,255,0.10)' },
+  tabText: { color: N.ink2, fontSize: 11, fontWeight: '600' },
+})
