@@ -14,7 +14,7 @@
     "eas:production:ios": "npx --yes eas-cli@latest build --profile production --platform ios",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build:web": "expo export --platform web --output-dir dist"
+    "build:web": "expo export --platform web --output-dir dist --clear"
   },
   "dependencies": {
     "@cabinsentinel/api-client": "*",
